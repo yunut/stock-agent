@@ -95,21 +95,46 @@ class StockAgent:
     def analyze_stock(self, ticker: str, thread_id: str = None) -> Dict:
         """주식 종목을 분석하고 투자 의견을 반환합니다."""
         try:
-            # 에이전트 실행기 생성
-            agent_executor = AgentExecutor(
-                agent=self.agent,
-                tools=self.tools,
-                max_iterations=3,  # 최대 반복 횟수 제한
-                handle_parsing_errors=True  # 파싱 오류 처리
-            )
+            # 각 분석을 순차적으로 실행
+            chart_result = self._analyze_chart(ticker)
+            news_result = self._analyze_news(ticker)
+            financial_result = self._analyze_financials(ticker)
             
-            # 에이전트 실행
-            result = agent_executor.invoke(
-                {"input": f"주식 심볼 {ticker}에 대해 분석해주세요."}
-            )
+            # 분석 결과 종합
+            summary_prompt = ChatPromptTemplate.from_messages([
+                ("system", """주식 투자 전문가로서 차트 분석, 뉴스 분석, 재무제표 분석 결과를 종합하여 최종 투자 의견을 제시해주세요.
+                
+                분석 결과는 다음 형식으로 작성해주세요:
+                - 기술적 분석: [차트 분석 결과]
+                - 뉴스 분석: [뉴스 분석 결과]
+                - 재무 분석: [재무 분석 결과]
+                - 종합 투자 의견: [최종 의견]
+                - 투자 위험도: [낮음/중간/높음]
+                - 매매 시그널: [매수/매도/홀딩]
+                """),
+                ("user", """다음은 {ticker}에 대한 분석 결과입니다:
+                
+                차트 분석:
+                {chart_analysis}
+                
+                뉴스 분석:
+                {news_analysis}
+                
+                재무제표 분석:
+                {financial_analysis}""")
+            ])
+            
+            chain = summary_prompt | self.llm
+            
+            result = chain.invoke({
+                "ticker": ticker,
+                "chart_analysis": chart_result,
+                "news_analysis": news_result,
+                "financial_analysis": financial_result
+            })
             
             return {
-                "messages": [{"role": "assistant", "content": result["output"]}]
+                "messages": [{"role": "assistant", "content": result.content if hasattr(result, "content") else result}]
             }
         except Exception as e:
             print(f"분석 중 오류 발생: {str(e)}")
