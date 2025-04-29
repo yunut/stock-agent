@@ -1,14 +1,25 @@
 from typing import List, Dict
-from duckduckgo_search import DDGS
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableSequence
+import json
+import os
+from dotenv import load_dotenv
+
+# 환경 변수 로드
+load_dotenv()
 
 # 뉴스 분석 에이전트
 class NewsAnalyzer:
     def __init__(self):
         self.llm = ChatOpenAI(temperature=0)
-        self.ddgs = DDGS()  # DDGS 객체 초기화
+        self.client_id = os.getenv('NAVER_CLIENT_ID')
+        self.client_secret = os.getenv('NAVER_CLIENT_SECRET')
+        if not self.client_id or not self.client_secret:
+            raise ValueError("NAVER_CLIENT_ID와 NAVER_CLIENT_SECRET이 환경 변수에 설정되어 있지 않습니다.")
         self._setup_prompts()
         
     def _setup_prompts(self):
@@ -32,15 +43,52 @@ class NewsAnalyzer:
         
         self.news_chain = self.news_analysis_prompt | self.llm
     
-    def search_news(self, company: str) -> List[Dict]:
-        """뉴스 검색"""
-        query = f"{company} stock news"
+    def search_news(self, company: str) -> List[Dict[str, str]]:
+        """네이버 검색 API를 사용하여 뉴스를 검색합니다.
+        
+        Args:
+            company (str): 종목 코드 또는 회사명
+            
+        Returns:
+            List[Dict[str, str]]: 뉴스 정보 리스트
+        """
+        url = "https://openapi.naver.com/v1/search/news.json"
+        headers = {
+            "X-Naver-Client-Id": self.client_id,
+            "X-Naver-Client-Secret": self.client_secret
+        }
+        params = {
+            "query": company,
+            "display": 5,  # 검색 결과 개수
+            "sort": "date"  # 최신순 정렬
+        }
+        
         try:
-            results = list(self.ddgs.news(
-                query,
-                max_results=5  # 최대 5개의 뉴스만 검색
-            ))
-            return results
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            
+            news_data = response.json()
+            news_list = []
+            
+            for item in news_data.get('items', []):
+                # HTML 태그 제거
+                title = BeautifulSoup(item['title'], 'html.parser').get_text()
+                description = BeautifulSoup(item['description'], 'html.parser').get_text()
+                
+                # 날짜 형식 변환
+                pub_date = datetime.strptime(item['pubDate'], '%a, %d %b %Y %H:%M:%S %z')
+                formatted_date = pub_date.strftime('%Y.%m.%d %H:%M')
+                
+                news_list.append({
+                    'title': title,
+                    'date': formatted_date,
+                    'source': item.get('source', '네이버 뉴스'),
+                    'link': item['link'],
+                    'body': description
+                })
+            
+            return news_list
+            
         except Exception as e:
             print(f"뉴스 검색 중 오류 발생: {str(e)}")
             return []
@@ -49,8 +97,11 @@ class NewsAnalyzer:
         """뉴스 데이터를 압축하여 중요 정보만 추출합니다."""
         compressed_news = []
         for news in news_list:
-            # 제목과 날짜만 포함
-            compressed_news.append(f"제목: {news['title']}\n날짜: {news['date']}")
+            compressed_news.append(
+                f"제목: {news['title']}\n"
+                f"날짜: {news['date']}\n"
+                f"내용 요약: {news.get('body', '내용 없음')}"
+            )
         return "\n\n".join(compressed_news)
     
     def analyze_news(self, company: str, news_list: List[Dict]) -> Dict:
@@ -66,7 +117,7 @@ class NewsAnalyzer:
         
         return {
             "news_list": news_list,
-            "analysis": analysis
+            "analysis": analysis.content  # AIMessage 객체에서 content만 추출
         }
     
     def get_news_analysis(self, company: str) -> Dict:
