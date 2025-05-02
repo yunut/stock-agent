@@ -35,9 +35,31 @@ class ETFVectorUpdater:
         os.makedirs('data/etf_backup', exist_ok=True)
         os.makedirs('logs', exist_ok=True)
         
+    def _get_test_data(self) -> pd.DataFrame:
+        """테스트용 ETF 데이터를 생성합니다."""
+        test_data = {
+            'code': ['069500', '114800', '069660'],
+            'name': ['KODEX 200', 'TIGER 코스닥150', 'KODEX 미국S&P500'],
+            'market': ['KODEX', 'TIGER', 'KODEX'],
+            'category': ['국내주식', '국내주식', '해외주식'],
+            'listing_date': ['2002-10-07', '2003-01-06', '2007-11-30'],
+            'expense_ratio': [0.05, 0.05, 0.15],
+            'tracking_error': [0.1, 0.1, 0.2],
+            'total_assets': [1000000000000, 500000000000, 800000000000],
+            'subscribers': [10000, 5000, 8000]
+        }
+        return pd.DataFrame(test_data)
+        
     def _fetch_etf_data(self) -> pd.DataFrame:
         """KRX에서 ETF 데이터를 가져옵니다."""
         try:
+            # TODO: KRX API 인증키 승인 후 실제 API 호출로 변경
+            # 현재는 테스트 데이터 사용
+            logging.info("KRX API 인증키 승인 대기 중이므로 테스트 데이터를 사용합니다.")
+            return self._get_test_data()
+            
+            # 실제 API 호출 코드 (인증키 승인 후 사용)
+            """
             url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
             headers = {
                 "User-Agent": "Mozilla/5.0",
@@ -73,48 +95,12 @@ class ETFVectorUpdater:
             df['subscribers'] = 0
             
             return df
+            """
             
         except Exception as e:
             logging.error(f"ETF 데이터 가져오기 실패: {str(e)}")
             raise
             
-    def _get_etf_details(self, code: str) -> dict:
-        """네이버 금융에서 ETF 상세 정보를 가져옵니다."""
-        try:
-            url = f"https://finance.naver.com/etf/etfDetail.nhn?code={code}"
-            headers = {
-                "User-Agent": "Mozilla/5.0"
-            }
-            
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            
-            # 여기에 BeautifulSoup을 사용하여 상세 정보 파싱
-            # 예시: 운용보수, 추적오차, 순자산, 가입자수 등
-            
-            return {
-                "expense_ratio": 0.0,
-                "tracking_error": 0.0,
-                "total_assets": 0,
-                "subscribers": 0
-            }
-            
-        except Exception as e:
-            logging.error(f"ETF 상세 정보 가져오기 실패 (코드: {code}): {str(e)}")
-            return None
-            
-    def _update_etf_details(self, df: pd.DataFrame) -> pd.DataFrame:
-        """ETF 상세 정보를 업데이트합니다."""
-        for idx, row in df.iterrows():
-            details = self._get_etf_details(row['code'])
-            if details:
-                df.at[idx, 'expense_ratio'] = details['expense_ratio']
-                df.at[idx, 'tracking_error'] = details['tracking_error']
-                df.at[idx, 'total_assets'] = details['total_assets']
-                df.at[idx, 'subscribers'] = details['subscribers']
-                
-        return df
-        
     def _create_documents(self, df: pd.DataFrame) -> list:
         """ETF 정보를 Document 객체로 변환합니다."""
         documents = []
@@ -147,17 +133,14 @@ class ETFVectorUpdater:
             # 1. ETF 기본 정보 가져오기
             df = self._fetch_etf_data()
             
-            # 2. ETF 상세 정보 업데이트
-            df = self._update_etf_details(df)
-            
-            # 3. 데이터 백업
+            # 2. 데이터 백업
             backup_file = f"data/etf_backup/etf_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             df.to_csv(backup_file, index=False)
             
-            # 4. Document 객체 생성
+            # 3. Document 객체 생성
             documents = self._create_documents(df)
             
-            # 5. 벡터 저장소 업데이트
+            # 4. 벡터 저장소 업데이트
             self.vector_store = Chroma.from_documents(
                 documents=documents,
                 embedding=self.embeddings,
