@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma
 from langchain.schema import Document
 import schedule
 import time
@@ -28,6 +28,11 @@ class ETFVectorUpdater:
         self.embeddings = OpenAIEmbeddings()
         self.vector_store = None
         self._setup_directories()
+        
+        # KRX API 키 설정
+        self.api_key = os.getenv('KRX_API_KEY')
+        if not self.api_key:
+            raise ValueError("KRX API 키가 설정되지 않았습니다. .env 파일을 확인해주세요.")
         
     def _setup_directories(self):
         """필요한 디렉토리를 생성합니다."""
@@ -53,40 +58,47 @@ class ETFVectorUpdater:
     def _fetch_etf_data(self) -> pd.DataFrame:
         """KRX에서 ETF 데이터를 가져옵니다."""
         try:
-            # TODO: KRX API 인증키 승인 후 실제 API 호출로 변경
-            # 현재는 테스트 데이터 사용
-            logging.info("KRX API 인증키 승인 대기 중이므로 테스트 데이터를 사용합니다.")
-            return self._get_test_data()
+            # 샘플 API 스펙의 테스트 날짜 사용
+            test_date = '20200414'
             
-            # 실제 API 호출 코드 (인증키 승인 후 사용)
-            """
-            url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+            url = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
+            params = {
+                'basDd': test_date
+            }
             headers = {
                 "User-Agent": "Mozilla/5.0",
-                "Referer": "http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201020101"
-            }
-            data = {
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT01501",
-                "locale": "ko_KR",
-                "mktId": "STK",
-                "share": "1",
-                "csvxls_isNo": "false",
-                "name": "fileDown",
-                "url": "dbms/MDC/STAT/standard/MDCSTAT01501"
+                "AUTH_KEY": self.api_key
             }
             
-            response = requests.post(url, headers=headers, data=data)
+            logging.info(f"API 요청 URL: {url}")
+            logging.info(f"API 요청 파라미터: {params}")
+            logging.info(f"API 요청 헤더: {headers}")
+            
+            response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
             
             etf_data = response.json()
-            if 'output' not in etf_data:
+            logging.info(f"API 응답: {etf_data}")
+            
+            if 'OutBlock_1' not in etf_data:
+                if 'error' in etf_data:
+                    raise ValueError(f"API 오류: {etf_data['error']}")
                 raise ValueError("API 응답 형식이 예상과 다릅니다.")
                 
-            df = pd.DataFrame(etf_data['output'])
+            df = pd.DataFrame(etf_data['OutBlock_1'])
+            
+            # 컬럼 이름 매핑
+            column_mapping = {
+                'ISU_CD': 'code',          # 종목코드
+                'ISU_NM': 'name',          # 종목명
+                'MKT_NM': 'market',        # 시장구분
+                'SECUGRP_NM': 'category',  # 증권구분
+                'LIST_DD': 'listing_date'  # 상장일
+            }
             
             # 필요한 컬럼만 선택하고 이름 변경
-            df = df[['ISU_CD', 'ISU_NM', 'MKT_NM', 'SECUGRP_NM', 'LIST_DD']]
-            df.columns = ['code', 'name', 'market', 'category', 'listing_date']
+            df = df.rename(columns=column_mapping)
+            df = df[list(column_mapping.values())]
             
             # 추가 정보 수집
             df['expense_ratio'] = 0.0
@@ -95,7 +107,6 @@ class ETFVectorUpdater:
             df['subscribers'] = 0
             
             return df
-            """
             
         except Exception as e:
             logging.error(f"ETF 데이터 가져오기 실패: {str(e)}")
