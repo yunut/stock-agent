@@ -58,12 +58,12 @@ class ETFVectorUpdater:
     def _fetch_etf_data(self) -> pd.DataFrame:
         """KRX에서 ETF 데이터를 가져옵니다."""
         try:
-            # 샘플 API 스펙의 테스트 날짜 사용
-            test_date = '20200414'
+            # 현재 날짜 사용
+            current_date = datetime.now().strftime('%Y%m%d')
             
             url = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
             params = {
-                'basDd': test_date
+                'basDd': current_date
             }
             headers = {
                 "User-Agent": "Mozilla/5.0",
@@ -87,20 +87,25 @@ class ETFVectorUpdater:
                 
             df = pd.DataFrame(etf_data['OutBlock_1'])
             
-            # 컬럼 이름 매핑
+            # 실제 컬럼명에 맞게 매핑
             column_mapping = {
                 'ISU_CD': 'code',          # 종목코드
-                'ISU_NM': 'name',          # 종목명
-                'MKT_NM': 'market',        # 시장구분
-                'SECUGRP_NM': 'category',  # 증권구분
-                'LIST_DD': 'listing_date'  # 상장일
+                'ISU_NM': 'name',        # 종목명
+                'MKT_NM': 'market',      # 시장구분
+                'SECUGRP_NM': 'category',# 증권구분
+                'LIST_DD': 'listing_date' # 상장일
             }
-            
-            # 필요한 컬럼만 선택하고 이름 변경
+            for src, tgt in column_mapping.items():
+                if src not in df.columns:
+                    df[src] = ''
             df = df.rename(columns=column_mapping)
+            # 필요한 컬럼만 추출 (없는 컬럼은 빈 값)
+            for tgt in column_mapping.values():
+                if tgt not in df.columns:
+                    df[tgt] = ''
             df = df[list(column_mapping.values())]
             
-            # 추가 정보 수집
+            # 추가 정보 수집 (기본값)
             df['expense_ratio'] = 0.0
             df['tracking_error'] = 0.0
             df['total_assets'] = 0
@@ -167,17 +172,8 @@ class ETFVectorUpdater:
 def main():
     """메인 함수"""
     updater = ETFVectorUpdater()
-    
-    # 매일 자정에 업데이트
-    schedule.every().day.at("00:00").do(updater.update_vector_store)
-    
-    # 처음 실행 시 즉시 업데이트
+    # 한 번만 실행
     updater.update_vector_store()
-    
-    # 스케줄러 실행
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
         
 if __name__ == "__main__":
     main() 
