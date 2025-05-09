@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain.vectorstores import Chroma
@@ -9,11 +9,16 @@ import json
 from dotenv import load_dotenv
 import pandas as pd
 import os
+import logging
+import re
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 class ETFAnalyzer:
-    def __init__(self, data_path: str = "data/etf_list.csv"):
+    def __init__(self):
         """ETF 분석기를 초기화합니다."""
         self.llm = ChatOpenAI(
             model="gpt-4-turbo-preview",
@@ -21,59 +26,18 @@ class ETFAnalyzer:
         )
         self.embeddings = OpenAIEmbeddings()
         self._setup_prompts()
-        self._load_etf_data(data_path)
-        self._setup_vector_store()
+        self._load_vector_store()
         
-    def _load_etf_data(self, data_path: str):
-        """ETF 데이터를 로드합니다."""
-        if not os.path.exists(data_path):
-            self._download_etf_data(data_path)
-            
-        self.etf_df = pd.read_csv(data_path)
-        self._setup_etf_categories()
-        
-    def _download_etf_data(self, data_path: str):
-        """KRX에서 ETF 데이터를 다운로드합니다."""
+    def _load_vector_store(self):
+        """기존 벡터 저장소를 로드합니다."""
         try:
-            # KRX API를 통해 ETF 목록 가져오기
-            url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "http://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201020101"
-            }
-            data = {
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT01501",
-                "locale": "ko_KR",
-                "mktId": "STK",
-                "share": "1",
-                "csvxls_isNo": "false",
-                "name": "fileDown",
-                "url": "dbms/MDC/STAT/standard/MDCSTAT01501"
-            }
-            
-            response = requests.post(url, headers=headers, data=data)
-            response.raise_for_status()
-            
-            # 응답을 DataFrame으로 변환
-            etf_data = response.json()
-            df = pd.DataFrame(etf_data['output'])
-            
-            # 필요한 컬럼만 선택
-            df = df[['ISU_CD', 'ISU_NM', 'MKT_NM', 'SECUGRP_NM', 'LIST_DD']]
-            df.columns = ['code', 'name', 'market', 'category', 'listing_date']
-            
-            # 추가 정보 수집
-            df['expense_ratio'] = 0.0
-            df['tracking_error'] = 0.0
-            df['total_assets'] = 0
-            df['subscribers'] = 0
-            
-            # 데이터 저장
-            os.makedirs(os.path.dirname(data_path), exist_ok=True)
-            df.to_csv(data_path, index=False)
-            
+            self.vector_store = Chroma(
+                persist_directory="data/etf_vectors",
+                embedding_function=self.embeddings
+            )
+            logger.info(f"벡터 저장소 로드 완료 (총 {self.vector_store._collection.count()} 개 ETF)")
         except Exception as e:
-            print(f"ETF 데이터 다운로드 중 오류 발생: {str(e)}")
+            logging.error(f"벡터 저장소 로드 실패: {str(e)}")
             raise
             
     def _setup_prompts(self):
@@ -92,7 +56,8 @@ class ETFAnalyzer:
         "max_expense_ratio": 최대 운용보수(%),
         "max_tracking_error": 최대 추적오차(%)
     }},
-    "preferences": ["수익률", "안정성", "성장성" 등 선호도]
+    "preferences": ["수익률", "안정성", "성장성" 등 선호도],
+    "keywords": ["반도체", "AI", "배터리" 등 관련 키워드]
 }}
 
 응답:"""
@@ -113,42 +78,6 @@ ETF 정보: {etf_info}
 응답:"""
         )
         
-    def _setup_etf_categories(self):
-        """ETF 카테고리 정보를 설정합니다."""
-        # 카테고리 매핑
-        category_mapping = {
-            "국내주식": ["KOSPI200", "KOSPI", "KOSDAQ"],
-            "미국주식": ["S&P500", "NASDAQ", "미국"],
-            "반도체": ["반도체", "반도체산업"],
-            "2차전지": ["2차전지", "배터리"],
-            "헬스케어": ["바이오", "헬스케어", "의료"],
-            "인공지능": ["AI", "인공지능"],
-            "친환경": ["친환경", "그린", "ESG"],
-            "메타버스": ["메타버스", "가상현실"],
-            "로봇": ["로봇", "자동화"],
-            "게임": ["게임", "엔터테인먼트"]
-        }
-        
-        # ETF 코드 -> 카테고리 매핑
-        self.etf_to_category = {}
-        for _, row in self.etf_df.iterrows():
-            code = row['code']
-            name = row['name']
-            category = row['category']
-            
-            self.etf_to_category[code] = []
-            for cat, keywords in category_mapping.items():
-                if any(keyword in name or keyword in category for keyword in keywords):
-                    self.etf_to_category[code].append(cat)
-                    
-        # 카테고리 -> ETF 코드 매핑
-        self.etf_categories = {}
-        for code, categories in self.etf_to_category.items():
-            for category in categories:
-                if category not in self.etf_categories:
-                    self.etf_categories[category] = []
-                self.etf_categories[category].append(code)
-                
     def get_etf_info(self, code: str) -> Optional[Dict]:
         """ETF 정보를 가져옵니다."""
         try:
@@ -170,109 +99,99 @@ ETF 정보: {etf_info}
             print(f"ETF 정보 조회 중 오류 발생: {str(e)}")
             return None
             
-    def _setup_vector_store(self):
-        """ETF 정보를 벡터 저장소에 저장합니다."""
-        # ETF 정보를 Document 객체로 변환
-        documents = []
-        for _, row in self.etf_df.iterrows():
-            content = f"""
-            ETF 이름: {row['name']}
-            운용사: {row['market']}
-            카테고리: {row['category']}
-            상장일: {row['listing_date']}
-            운용보수: {row['expense_ratio']}%
-            추적오차: {row['tracking_error']}%
-            순자산: {row['total_assets']}원
-            가입자수: {row['subscribers']}명
-            """
-            metadata = {
-                "code": row['code'],
-                "name": row['name'],
-                "company": row['market'],
-                "category": row['category']
-            }
-            documents.append(Document(page_content=content, metadata=metadata))
-            
-        # 벡터 저장소 생성
-        self.vector_store = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            persist_directory="data/etf_vectors"
-        )
-        
     def analyze_query(self, query: str) -> Dict:
-        """사용자의 질문을 분석하여 추천 기준을 도출합니다."""
+        """사용자의 질문을 분석하여 ETF를 추천합니다."""
         try:
             # 1. 질문 분석 (카테고리와 기준 도출)
             result = self.llm.invoke(self.query_analysis_prompt.format(query=query))
-            criteria = json.loads(result.content)
+            try:
+                criteria = json.loads(result.content)
+            except json.JSONDecodeError:
+                # 기본 검색 기준 설정
+                criteria = {
+                    "categories": [],
+                    "criteria": {
+                        "max_expense_ratio": 0.5,
+                        "max_tracking_error": 2.0,
+                        "min_assets": 100000000000  # 1000억원
+                    },
+                    "preferences": ["안정성"],
+                    "keywords": []
+                }
+                # 키워드 추출
+                if "반도체" in query:
+                    criteria["keywords"].append("반도체")
+                if "AI" in query or "인공지능" in query:
+                    criteria["keywords"].append("AI")
+                if "배터리" in query or "2차전지" in query:
+                    criteria["keywords"].append("2차전지")
+                if "안정" in query:
+                    criteria["preferences"].append("안정성")
+                if "수익" in query:
+                    criteria["preferences"].append("수익성")
+                if "성장" in query:
+                    criteria["preferences"].append("성장성")
             
             # 2. 벡터 검색을 통한 관련 ETF 찾기
             search_results = self.vector_store.similarity_search_with_score(
                 query,
-                k=10  # 상위 10개 ETF 검색
+                k=20  # 상위 20개 ETF 검색 (중복 제거 후 10개로 필터링)
             )
             
             # 3. 검색 결과를 점수 기준으로 필터링
-            filtered_etfs = []
+            filtered_etfs = {}  # 중복 제거를 위해 딕셔너리 사용
             for doc, score in search_results:
-                info = self.get_etf_info(doc.metadata['code'])
-                if info and self._meets_criteria(info, criteria['criteria']):
-                    filtered_etfs.append({
-                        'code': info['code'],
-                        'name': info['name'],
-                        'company': info['company'],
-                        'score': score,  # 유사도 점수
-                        'expense_ratio': info['expense_ratio'],
-                        'tracking_error': info['tracking_error'],
-                        'total_assets': info['total_assets'],
-                        'subscribers': info['subscribers']
-                    })
+                code = doc.metadata.get('code', '')
+                if not code or code in filtered_etfs:
+                    continue
+                    
+                # 메타데이터와 문서 내용 파싱
+                content_lines = doc.page_content.strip().split('\n')
+                content_dict = {}
+                for line in content_lines:
+                    line = line.strip()
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        content_dict[key.strip()] = value.strip()
+                
+                filtered_etfs[code] = {
+                    'code': code,
+                    'name': doc.metadata.get('name', content_dict.get('ETF 이름', '')),
+                    'company': doc.metadata.get('company', content_dict.get('운용사', '')),
+                    'category': doc.metadata.get('category', content_dict.get('카테고리', '')),
+                    'score': float(score),
+                    'expense_ratio': float(content_dict.get('운용보수', '0').replace('%', '0')),
+                    'tracking_error': float(content_dict.get('추적오차', '0').replace('%', '0')),
+                    'total_assets': int(content_dict.get('순자산', '0').replace('원', '0')),
+                    'subscribers': int(content_dict.get('가입자수', '0').replace('명', '0')),
+                    'listing_date': content_dict.get('상장일', '')
+                }
+            
+            # 4. 점수 기준으로 정렬하고 상위 10개만 선택
+            filtered_etfs = list(filtered_etfs.values())
+            filtered_etfs.sort(key=lambda x: x['score'])  # 낮은 점수가 더 유사함
+            filtered_etfs = filtered_etfs[:10]
             
             if not filtered_etfs:
                 return {"error": "기준에 맞는 ETF를 찾을 수 없습니다."}
             
-            # 4. 상위 3개 ETF에 대한 상세 분석
-            top_etfs = sorted(filtered_etfs, key=lambda x: x['score'], reverse=True)[:3]
+            # 5. 상위 3개 ETF에 대한 상세 분석
+            top_etfs = filtered_etfs[:3]
             detailed_analysis = self._analyze_top_etfs(top_etfs, criteria)
             
-            return {
-                "recommendations": filtered_etfs,
-                "detailed_analysis": detailed_analysis,
-                "criteria": criteria
+            # 6. 추천 결과 정리
+            recommendations = {
+                "top_recommendations": top_etfs,
+                "all_recommendations": filtered_etfs,
+                "criteria": criteria,
+                "analysis": detailed_analysis
             }
             
+            return recommendations
+            
         except Exception as e:
-            print(f"질문 분석 중 오류 발생: {str(e)}")
+            logging.error(f"질문 분석 중 오류 발생: {str(e)}")
             return {"error": str(e)}
-            
-    def _meets_criteria(self, etf_info: Dict, criteria: Dict) -> bool:
-        """ETF가 주어진 기준을 만족하는지 확인합니다."""
-        try:
-            # 비용 기준
-            if 'max_expense_ratio' in criteria:
-                if etf_info['expense_ratio'] > criteria['max_expense_ratio']:
-                    return False
-                    
-            # 추적오차 기준
-            if 'max_tracking_error' in criteria:
-                if etf_info['tracking_error'] > criteria['max_tracking_error']:
-                    return False
-                    
-            # 순자산 기준
-            if 'min_assets' in criteria:
-                if etf_info['total_assets'] < criteria['min_assets']:
-                    return False
-                    
-            # 가입자 수 기준
-            if 'min_subscribers' in criteria:
-                if etf_info['subscribers'] < criteria['min_subscribers']:
-                    return False
-                    
-            return True
-            
-        except:
-            return False
             
     def _analyze_top_etfs(self, top_etfs: List[Dict], criteria: Dict) -> str:
         """상위 ETF들에 대한 상세 분석을 수행합니다."""
@@ -283,23 +202,24 @@ ETF 정보: {etf_info}
                 features = {
                     'name': etf['name'],
                     'company': etf['company'],
-                    'expense_ratio': etf['expense_ratio'],
-                    'tracking_error': etf['tracking_error'],
-                    'total_assets': etf['total_assets'],
-                    'subscribers': etf['subscribers']
+                    'category': etf['category'],
+                    'expense_ratio': f"{etf['expense_ratio']}%",
+                    'tracking_error': f"{etf['tracking_error']}%",
+                    'total_assets': f"{etf['total_assets']:,}원",
+                    'subscribers': f"{etf['subscribers']:,}명",
+                    'listing_date': etf['listing_date']
                 }
                 etf_features.append(features)
             
             # LLM을 사용하여 분석
             analysis = self.llm.invoke(self.analysis_prompt.format(
-                etf_features=json.dumps(etf_features, ensure_ascii=False),
-                criteria=json.dumps(criteria, ensure_ascii=False)
+                etf_info=json.dumps(etf_features, ensure_ascii=False)
             ))
             
             return analysis.content
             
         except Exception as e:
-            print(f"상세 분석 중 오류 발생: {str(e)}")
+            logging.error(f"상세 분석 중 오류 발생: {str(e)}")
             return "상세 분석을 수행할 수 없습니다."
             
     def _calculate_score(self, etf_info: Dict, criteria: Dict) -> float:
@@ -334,4 +254,141 @@ ETF 정보: {etf_info}
             return score
             
         except:
-            return 0.0 
+            return 0.0
+
+    def _parse_metadata(self, doc: str) -> Dict[str, Any]:
+        """문서 내용에서 ETF 메타데이터를 추출합니다."""
+        metadata = {}
+        
+        # 숫자 데이터 추출을 위한 패턴
+        patterns = {
+            'expense_ratio': r'운용보수[^\d]*(\d+\.?\d*)',
+            'tracking_error': r'추적오차[^\d]*(\d+\.?\d*)',
+            'total_assets': r'순자산[^\d]*(\d+\.?\d*)',
+            'subscribers': r'가입자수[^\d]*(\d+)',
+            'listing_date': r'상장일[^\d]*(\d{4}[-/]\d{2}[-/]\d{2})',
+            'company': r'운용사:\s*([^\n]+)',
+            'category': r'카테고리:\s*([^\n]+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, doc)
+            if match:
+                value = match.group(1).strip()
+                if key in ['expense_ratio', 'tracking_error']:
+                    metadata[key] = float(value)
+                elif key in ['total_assets', 'subscribers']:
+                    # 쉼표 제거 후 숫자로 변환
+                    value = value.replace(',', '')
+                    metadata[key] = int(value)
+                else:
+                    metadata[key] = value
+            else:
+                # 기본값 설정
+                if key in ['expense_ratio', 'tracking_error']:
+                    metadata[key] = 0.0
+                elif key in ['total_assets', 'subscribers']:
+                    metadata[key] = 0
+                else:
+                    metadata[key] = ''
+        
+        return metadata
+
+    def _format_number(self, num: int) -> str:
+        """숫자를 천 단위 구분자가 있는 문자열로 변환합니다."""
+        return format(num, ',')
+
+    def analyze(self, query: str) -> Dict[str, Any]:
+        """사용자 쿼리에 기반하여 ETF를 분석하고 추천합니다."""
+        # 쿼리 의도 파악
+        intent_prompt = ChatPromptTemplate.from_messages([
+            ("system", "사용자의 ETF 검색 의도를 분석하여 다음 정보를 추출하세요:\n"
+                      "1. 관심 있는 ETF 카테고리 목록\n"
+                      "2. 선호하는 투자 성향 (안정성/수익성)\n"
+                      "3. 검색할 키워드\n"
+                      "4. ETF 선별 기준 (운용보수 상한, 추적오차 상한, 최소 순자산)"),
+            ("human", "{query}")
+        ])
+        
+        intent_response = self.llm.invoke(
+            intent_prompt.format_messages(query=query)
+        )
+        
+        try:
+            criteria = json.loads(intent_response.content)
+        except:
+            # 기본 검색 기준
+            criteria = {
+                "categories": [],
+                "preferences": ["안정성"],
+                "keywords": [],
+                "criteria": {
+                    "max_expense_ratio": 0.5,
+                    "max_tracking_error": 2.0,
+                    "min_assets": 100_000_000_000  # 1000억원
+                }
+            }
+        
+        # 벡터 검색 수행 (중복 제거를 위해 20개 검색)
+        docs = self.vector_store.similarity_search(query, k=20)
+        
+        # 검색 결과 파싱 및 필터링
+        results = []
+        seen_codes = set()
+        
+        for doc in docs:
+            metadata = self._parse_metadata(doc.page_content)
+            code = doc.metadata.get('code', '')
+            name = doc.metadata.get('name', '')
+            
+            # 중복 제거
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            
+            # 기준에 맞는지 확인
+            if (metadata['expense_ratio'] > criteria['criteria']['max_expense_ratio'] or
+                metadata['tracking_error'] > criteria['criteria']['max_tracking_error'] or
+                metadata['total_assets'] < criteria['criteria']['min_assets']):
+                continue
+                
+            results.append({
+                'code': code,
+                'name': name,
+                'company': metadata['company'],
+                'category': metadata['category'],
+                'score': doc.metadata.get('score', 0.0),
+                'expense_ratio': metadata['expense_ratio'],
+                'tracking_error': metadata['tracking_error'],
+                'total_assets': metadata['total_assets'],
+                'subscribers': metadata['subscribers'],
+                'listing_date': metadata['listing_date']
+            })
+            
+            if len(results) >= 10:  # 최대 10개까지만 저장
+                break
+        
+        # 유사도 점수로 정렬
+        results.sort(key=lambda x: x['score'])
+        
+        # 분석 생성
+        analysis_prompt = ChatPromptTemplate.from_messages([
+            ("system", "주어진 ETF 목록을 분석하여 다음 내용을 포함하는 종합 분석 리포트를 작성하세요:\n"
+                      "1. 각 ETF의 장단점\n"
+                      "2. 운용사별 비교\n"
+                      "3. 투자 위험 요소\n"
+                      "4. 향후 전망\n"
+                      "5. 투자 추천 의견"),
+            ("human", f"ETF 목록: {json.dumps(results[:3], ensure_ascii=False, indent=2)}")
+        ])
+        
+        analysis_response = self.llm.invoke(
+            analysis_prompt.format_messages()
+        )
+        
+        return {
+            'top_recommendations': results[:3],
+            'all_recommendations': results,
+            'criteria': criteria,
+            'analysis': analysis_response.content
+        } 

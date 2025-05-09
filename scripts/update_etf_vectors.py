@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -9,6 +9,7 @@ from langchain.schema import Document
 import schedule
 import time
 import logging
+import yfinance as yf
 
 # 로깅 설정
 logging.basicConfig(
@@ -28,11 +29,6 @@ class ETFVectorUpdater:
         self.embeddings = OpenAIEmbeddings()
         self.vector_store = None
         self._setup_directories()
-        
-        # KRX API 키 설정
-        self.api_key = os.getenv('KRX_API_KEY')
-        if not self.api_key:
-            raise ValueError("KRX API 키가 설정되지 않았습니다. .env 파일을 확인해주세요.")
         
     def _setup_directories(self):
         """필요한 디렉토리를 생성합니다."""
@@ -55,68 +51,69 @@ class ETFVectorUpdater:
         }
         return pd.DataFrame(test_data)
         
-    def _fetch_etf_data(self) -> pd.DataFrame:
-        """KRX에서 ETF 데이터를 가져옵니다."""
+    def _fetch_yahoo_finance_info(self, code: str) -> dict:
+        """야후 파이낸스에서 ETF 상세 정보를 가져옵니다."""
+        ticker = f"{code}.KS"
         try:
-            # 현재 날짜 사용
-            current_date = datetime.now().strftime('%Y%m%d')
-            
-            url = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
-            params = {
-                'basDd': current_date
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            # 1년 수익률 계산
+            hist = stock.history(period="1y")
+            if not hist.empty:
+                start_price = hist['Close'].iloc[0]
+                end_price = hist['Close'].iloc[-1]
+                return_1y = ((end_price - start_price) / start_price) * 100
+            else:
+                return_1y = 0.0
+            return {
+                'market_cap': info.get('marketCap', 0),
+                'current_price': info.get('regularMarketPrice', 0),
+                'return_1y': return_1y
             }
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "AUTH_KEY": self.api_key
-            }
-            
-            logging.info(f"API 요청 URL: {url}")
-            logging.info(f"API 요청 파라미터: {params}")
-            logging.info(f"API 요청 헤더: {headers}")
-            
-            response = requests.get(url, params=params, headers=headers)
-            response.raise_for_status()
-            
-            etf_data = response.json()
-            logging.info(f"API 응답: {etf_data}")
-            
-            if 'OutBlock_1' not in etf_data:
-                if 'error' in etf_data:
-                    raise ValueError(f"API 오류: {etf_data['error']}")
-                raise ValueError("API 응답 형식이 예상과 다릅니다.")
-                
-            df = pd.DataFrame(etf_data['OutBlock_1'])
-            
-            # 실제 컬럼명에 맞게 매핑
-            column_mapping = {
-                'ISU_CD': 'code',          # 종목코드
-                'ISU_NM': 'name',        # 종목명
-                'MKT_NM': 'market',      # 시장구분
-                'SECUGRP_NM': 'category',# 증권구분
-                'LIST_DD': 'listing_date' # 상장일
-            }
-            for src, tgt in column_mapping.items():
-                if src not in df.columns:
-                    df[src] = ''
-            df = df.rename(columns=column_mapping)
-            # 필요한 컬럼만 추출 (없는 컬럼은 빈 값)
-            for tgt in column_mapping.values():
-                if tgt not in df.columns:
-                    df[tgt] = ''
-            df = df[list(column_mapping.values())]
-            
-            # 추가 정보 수집 (기본값)
-            df['expense_ratio'] = 0.0
-            df['tracking_error'] = 0.0
-            df['total_assets'] = 0
-            df['subscribers'] = 0
-            
-            return df
-            
         except Exception as e:
-            logging.error(f"ETF 데이터 가져오기 실패: {str(e)}")
+            logging.warning(f"{ticker} 야후 파이낸스 조회 실패: {str(e)}")
+            return {'market_cap': 0, 'current_price': 0, 'return_1y': 0.0}
+
+    def _fetch_etf_data(self) -> pd.DataFrame:
+        """네이버 금융에서 ETF 전체 리스트와 주요 정보를 가져옵니다."""
+        try:
+            url = "https://finance.naver.com/api/sise/etfItemList.nhn"
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            etf_list = data['result']['etfItemList']
+            df = pd.DataFrame(etf_list)
+
+            # 컬럼명 통일 및 필요한 컬럼만 추출
+            df = df.rename(columns={
+                'itemcode': 'code',
+                'itemname': 'name',
+                'market': 'market',
+                'provider': 'company',
+                'nowVal': 'current_price',
+                'marketSum': 'market_cap',
+                'nav': 'nav',
+                'threeMonthEarnRate': 'return_3m',
+                'quant': 'volume',
+                'amount': 'amount',
+                'list_shares': 'list_shares',
+                'category': 'category',
+                'expenseRatio': 'expense_ratio',
+                'trackingError': 'tracking_error',
+                'listedShare': 'listed_share',
+                'listedDate': 'listing_date'
+            })
+            # 일부 컬럼이 없을 수 있으니, 주요 컬럼만 남기고 없는 컬럼은 기본값
+            for col in ['code', 'name', 'company', 'market', 'current_price', 'market_cap', 'nav', 'return_3m', 'volume', 'amount', 'expense_ratio', 'tracking_error', 'listing_date']:
+                if col not in df.columns:
+                    df[col] = 0 if col not in ['code', 'name', 'company', 'market', 'listing_date'] else ''
+            # 필요 컬럼만 추출
+            df = df[['code', 'name', 'company', 'market', 'current_price', 'market_cap', 'nav', 'return_3m', 'volume', 'amount', 'expense_ratio', 'tracking_error', 'listing_date']]
+            return df
+        except Exception as e:
+            logging.error(f"네이버 ETF 데이터 가져오기 실패: {str(e)}")
             raise
-            
+
     def _create_documents(self, df: pd.DataFrame) -> list:
         """ETF 정보를 Document 객체로 변환합니다."""
         documents = []
@@ -134,7 +131,7 @@ class ETFVectorUpdater:
             metadata = {
                 "code": row['code'],
                 "name": row['name'],
-                "company": row['market'],
+                "company": row['company'],
                 "category": row['category']
             }
             documents.append(Document(page_content=content, metadata=metadata))
